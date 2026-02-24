@@ -39,6 +39,19 @@ class PollingService:
                 logger.exception("Error polling %s", provider.name)
             await asyncio.sleep(interval)
 
+    async def _log_status_summary(self, provider: StatusPageProvider):
+        overall, components = await provider.fetch_summary()
+        non_operational = [
+            c for c in components if c.status.value != "operational"
+        ]
+        print(f"\n{'=' * 60}")
+        print(f"[{provider.name.upper()}] Overall: {overall.description}")
+        print(f"  Components: {len(components)} total, {len(components) - len(non_operational)} operational")
+        if non_operational:
+            for c in non_operational:
+                print(f"  !! {c.name}: {c.status.value}")
+        print(f"{'=' * 60}")
+
     async def _check_for_updates(self, provider: StatusPageProvider):
         incidents = await provider.fetch_incidents()
 
@@ -50,8 +63,24 @@ class PollingService:
 
         last_seen = self._last_seen.get(provider.name)
 
-        # First poll: set watermark silently, don't flood with historical data
+        # First poll: log current status, set watermark
         if last_seen is None:
+            await self._log_status_summary(provider)
+
+            # Show recent unresolved incidents
+            unresolved = [i for i in incidents if i.status.value != "resolved"]
+            if unresolved:
+                print(f"\n  Active incidents ({len(unresolved)}):")
+                for inc in unresolved:
+                    print(f"    - {inc.name} [{inc.impact.value}] ({inc.status.value})")
+                    if inc.incident_updates:
+                        latest = inc.incident_updates[0]
+                        if latest.body:
+                            print(f"      {latest.body}")
+            else:
+                print("  No active incidents.")
+            print()
+
             if all_update_times:
                 self._last_seen[provider.name] = max(all_update_times)
             logger.info("Initial poll for %s complete, watermark set", provider.name)
@@ -82,9 +111,14 @@ class PollingService:
                 )
                 new_events.append(event)
 
-        # Emit in chronological order
+        # Emit in chronological order and print to console
         for event in sorted(new_events, key=lambda e: e.timestamp):
             await self._event_bus.emit(event)
+            ts = event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{ts}] Product: {provider.name.upper()} - {event.incident_name}")
+            print(f"Status: {event.new_status}")
+            if event.message:
+                print(f"Detail: {event.message}")
             logger.info(event.message)
 
         # Update watermark
